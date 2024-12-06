@@ -1,65 +1,105 @@
 #!/bin/bash
 
-# Vérifier si LXC est installé, sinon l'installer
-if ! command -v lxc-create &> /dev/null
-then
-    echo "LXC n'est pas installé. Installation en cours..."
-    sudo apt-get update
-    sudo apt-get install -y lxc
+# Vérifier si l'utilisateur exécute le script avec des privilèges root
+if [ "$(id -u)" -eq 0 ]; then
+    echo "Ce script doit être exécuté avec un utilisateur non root pour configurer les conteneurs non-privilégiés."
+    exit 1
 fi
 
-# Vérifier si tmux est installé, sinon l'installer
-if ! command -v tmux &> /dev/null
-then
-    echo "tmux n'est pas installé. Installation en cours..."
-    sudo apt-get update
-    sudo apt-get install -y tmux
-fi
-
-# Configuration des variables
+# Variables
+USER_NAME=$(whoami)
+LXC_PATH="/home/$USER_NAME/.local/share/lxc"
 CONTAINER1="producteur"
 CONTAINER2="consommateur"
-IP1="10.0.3.11"
-IP2="10.0.3.12"
-BRIDGE="lxcbr0"
+DISTRO="alpine"
+RELEASE="3.20"
+ARCH="amd64"
 
-# Créer les conteneurs non privilégiés
-echo "Création des conteneurs..."
-lxc-create -t download -n $CONTAINER1 -- -d ubuntu -r focal -a amd64
-lxc-create -t download -n $CONTAINER2 -- -d ubuntu -r focal -a amd64
+# 1. Installation de LXC et tmux
+echo "Installation de LXC et tmux si nécessaire..."
+if ! command -v lxc-create &> /dev/null; then
+    sudo apt update
+    sudo apt install -y lxc lxc-templates
+else
+    echo "LXC est déjà installé."
+fi
 
-# Configurer les adresses IP des conteneurs
-echo "Configuration des adresses IP..."
-cat <<EOF | sudo tee /var/lib/lxc/$CONTAINER1/config
-lxc.net.0.type = veth
-lxc.net.0.link = $BRIDGE
-lxc.net.0.flags = up
-lxc.net.0.ipv4.address = $IP1/24
-lxc.net.0.ipv4.gateway = 10.0.3.1
-EOF
+if ! command -v tmux &> /dev/null; then
+    sudo apt install -y tmux
+else
+    echo "tmux est déjà installé."
+fi
 
-cat <<EOF | sudo tee /var/lib/lxc/$CONTAINER2/config
-lxc.net.0.type = veth
-lxc.net.0.link = $BRIDGE
-lxc.net.0.flags = up
-lxc.net.0.ipv4.address = $IP2/24
-lxc.net.0.ipv4.gateway = 10.0.3.1
-EOF
+# 2. Configuration des permissions pour conteneurs non-privilégiés
+echo "Configuration des permissions pour conteneurs non-privilégiés..."
+SUBUID_LINE="$USER_NAME:100000:65536"
+SUBGID_LINE="$USER_NAME:100000:65536"
 
-# Démarrer les conteneurs
+# Ajouter les sous-identifiants à /etc/subuid et /etc/subgid
+if ! grep -q "^$SUBUID_LINE" /etc/subuid; then
+    echo "$SUBUID_LINE" | sudo tee -a /etc/subuid
+fi
+if ! grep -q "^$SUBGID_LINE" /etc/subgid; then
+    echo "$SUBGID_LINE" | sudo tee -a /etc/subgid
+fi
+
+# 3. Créer les conteneurs non-privilégiés
+echo "Création des conteneurs non-privilégiés..."
+
+# Créer le conteneur producteur
+if [ ! -d "$LXC_PATH/$CONTAINER1" ]; then
+    lxc-create -n $CONTAINER1 -t download -- -d $DISTRO -r $RELEASE -a $ARCH
+    echo "Conteneur '$CONTAINER1' créé avec succès."
+else
+    echo "Le conteneur '$CONTAINER1' existe déjà."
+fi
+
+# Créer le conteneur consommateur
+if [ ! -d "$LXC_PATH/$CONTAINER2" ]; then
+    lxc-create -n $CONTAINER2 -t download -- -d $DISTRO -r $RELEASE -a $ARCH
+    echo "Conteneur '$CONTAINER2' créé avec succès."
+else
+    echo "Le conteneur '$CONTAINER2' existe déjà."
+fi
+
+# 4. Configurer chaque conteneur pour utiliser les UID/GID non-privilégiés
+echo "Configuration des fichiers de chaque conteneur pour le mode non-privilégié..."
+
+for CONTAINER in $CONTAINER1 $CONTAINER2; do
+    CONFIG_FILE="$LXC_PATH/$CONTAINER/config"
+    
+    if ! grep -q "^lxc.idmap" "$CONFIG_FILE"; then
+        echo "lxc.idmap = u 0 100000 65536" >> "$CONFIG_FILE"
+        echo "lxc.idmap = g 0 100000 65536" >> "$CONFIG_FILE"
+        echo "Fichier de configuration pour '$CONTAINER' mis à jour."
+    fi
+
+    # Vérifiez que /dev/shm est monté pour utiliser la mémoire partagée
+    if ! grep -q "^lxc.mount.entry = /dev/shm" "$CONFIG_FILE"; then
+        echo "lxc.mount.entry = /dev/shm dev/shm none bind,create=dir 0 0" >> "$CONFIG_FILE"
+        echo "Montage de /dev/shm pour '$CONTAINER' configuré."
+    fi
+done
+
+# 5. Démarrer les conteneurs
 echo "Démarrage des conteneurs..."
-lxc-start -n $CONTAINER1
-lxc-start -n $CONTAINER2
+lxc-start -n $CONTAINER1 -d && echo "Conteneur '$CONTAINER1' démarré."
+lxc-start -n $CONTAINER2 -d && echo "Conteneur '$CONTAINER2' démarré."
 
-# Attacher les conteneurs à des terminaux différents en utilisant tmux
-echo "Attachement des conteneurs à des terminaux tmux..."
-tmux new-session -d -s mysession "lxc-attach -n $CONTAINER1"
-tmux split-window -h "lxc-attach -n $CONTAINER2"
-tmux select-layout even-horizontal
-tmux attach -t mysession
+# 6. Ouvrir tmux et attacher chaque conteneur dans un panneau différent
+echo "Ouverture de tmux pour attacher les conteneurs..."
+tmux new-session -d -s containers
+tmux rename-window -t containers "Containers"
 
-# Afficher les informations des conteneurs
-echo "Informations des conteneurs:"
-lxc-ls -f
+# Panneau 1 pour le conteneur producteur
+tmux send-keys -t containers "lxc-attach -n $CONTAINER1" C-m
 
-echo "Configuration terminée. Les conteneurs ont été créés, configurés avec des adresses IP différentes et attachés à des terminaux tmux."
+# Créer un deuxième panneau pour le conteneur consommateur
+tmux split-window -h -t containers
+tmux send-keys -t containers:0.1 "lxc-attach -n $CONTAINER2" C-m
+
+# Sélectionner le panneau de gauche pour commencer
+tmux select-pane -t containers:0.0
+
+# Attacher à la session tmux
+tmux attach -t containers
