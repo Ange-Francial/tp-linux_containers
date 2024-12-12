@@ -15,19 +15,13 @@ DISTRO="alpine"
 RELEASE="3.20"
 ARCH="amd64"
 
-# 1. Installation de LXC et tmux
-echo "Installation de LXC et tmux si nécessaire..."
+# 1. Installation de LXC
+echo "Installation de LXC si nécessaire..."
 if ! command -v lxc-create &> /dev/null; then
     sudo apt update
     sudo apt install -y lxc lxc-templates
 else
     echo "LXC est déjà installé."
-fi
-
-if ! command -v tmux &> /dev/null; then
-    sudo apt install -y tmux
-else
-    echo "tmux est déjà installé."
 fi
 
 # 2. Configuration des permissions pour conteneurs non-privilégiés
@@ -86,20 +80,8 @@ echo "Démarrage des conteneurs..."
 lxc-start -n $CONTAINER1 -d && echo "Conteneur '$CONTAINER1' démarré."
 lxc-start -n $CONTAINER2 -d && echo "Conteneur '$CONTAINER2' démarré."
 
-# 6. Ouvrir tmux et attacher chaque conteneur dans un panneau différent
-echo "Ouverture de tmux pour attacher les conteneurs..."
-tmux new-session -d -s containers
-tmux rename-window -t containers "Containers"
+# 6. Afficher l'information sur les conteneurs
+echo "Information sur les conteneurs :"
+lxc-ls -f
 
-# Panneau 1 pour le conteneur producteur
-tmux send-keys -t containers "lxc-attach -n $CONTAINER1" C-m
-
-# Créer un deuxième panneau pour le conteneur consommateur
-tmux split-window -h -t containers
-tmux send-keys -t containers:0.1 "lxc-attach -n $CONTAINER2" C-m
-
-# Sélectionner le panneau de gauche pour commencer
-tmux select-pane -t containers:0.0
-
-# Attacher à la session tmux
-tmux attach -t containers
+echo "La configuration est terminée. Les conteneurs '$CONTAINER1' et '$CONTAINER2' sont prêts."
